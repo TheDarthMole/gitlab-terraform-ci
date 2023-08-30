@@ -1,0 +1,121 @@
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_reqeust_event"
+    - if: ($CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS)
+      when: never
+    - if: ($CI_PIPELINE_SOURCE == "push")
+
+variables:
+  HTTP_PROXY: ""
+  HTTPS_PROXY: ""
+  NO_PROXY: ""
+
+  TF_ADDRESS: ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/${CI_COMMIT_BRANCH}
+  TF_IMAGE: "ubuntu:latest" # TODO: maybe use gitlab-terraform docker image
+  TF_EXEC: "gitlab-terraform"
+  TF_ROOT: "."
+  TF_LOG: "WARN"
+
+
+stages:
+  - "Lint"
+  - "Plan"
+  - "Test"
+  - "Apply"
+  - "Destroy"
+
+terraform-lint:
+  extends: .terraform
+  stage: "Lint"
+  rules:
+    - if: $TF_DESTROY_ONLY
+      when: never
+    - if: ($CI_PIPELINE_SOURCE == "merge_request_event")
+    - if: ($CI_PIPELINE_SOURCE == "push")
+  script:
+    - |
+      $(TF_EXEC) validate
+      $(TF_EXEC) version
+      
+terraform-plan:
+  resource_group: terraform
+  extends: .terraform
+  retry: 2
+  stage: "Plan"
+  rules:
+    - if: $TF_DESTROY_ONLY
+      when: never
+    - if: ($CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main")
+      variables:
+        TF_ADDRESS: ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}
+    - if: ($CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main")
+  needs:
+    - terraform-lint
+  dependencies: [terraform-lint]
+  script:
+    - ${TF_EXEC} plan 2>&1 | tee tfplan.log
+    - ${TF_EXEC} plan-json
+    - terraform show -no-color plan.cache > no-color.log
+  artifacts:
+    reports:
+      terraform: ${TF_ROOT}/plan.json
+    name: tf-logs
+    paths:
+      - ${TF_ROOT}/tfplan.log
+      - ${TF_ROOT}/no-color.log
+      - ${TF_ROOT}/plan.json
+      - ${TF_ROOT}/plan.cache
+  when: always
+
+terraform-apply:
+  environment: Azure-${CI_COMMIT_BRANCH}
+  resource_group: terraform
+  extends: .terraform
+  retry:
+    max: 2
+    when:
+      - script_failure
+      - runner_system_failure
+      - stuck_or_timeout_failure
+  stage: "Apply"
+  rules:
+    - if: $TF_DESTROY_ONLY
+      when: never
+    - if: ($CI_PIPELINE_SOURCE == "merge_request_event")
+      when: never
+    - if: ($CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main")
+      when: manual
+  needs:
+    - terraform-plan
+  dependencies: [terraform-plan]
+  script:
+    - echo $(date)
+    - ${TF_EXEC} plan
+    - ${TF_EXEC} plan-json > tfplan.log
+    - cat plan.json
+    - sleep 30
+    - ${TF_EXEC} apply -no-color -auto-approve 2>&1 | tee tfapplyjson.log
+  after_script:
+    - echo $(date)
+  artifacts:
+    name: tf-logs
+    paths:
+      - ${TF_ROOT}/tfplan.log
+      - ${TF_ROOT}/tfapplyjson.log
+  when: always
+
+destroy:
+  extends: .terraform_cleanup
+  timeout: 60 minutes
+  stage: "Destroy"
+  retry: 2
+  allow_failure: true
+  dependencies: []
+  rules:
+    - if: ($CI_COMMIT_BRANCH == "main")
+      when: manual
+  script:
+    - ${TF_EXEC} plan --destroy
+    - sleep 120
+    - ${TF_EXEC} destroy
+    - echo "Goodbye"
