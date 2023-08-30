@@ -16,6 +16,27 @@ variables:
   TF_ROOT: "."
   TF_LOG: "WARN"
 
+.runner:
+  tags: &CI_TAGS
+    - k8s
+
+.terraform:
+  image:
+    name: "$TF_IMAGE"
+    entrypoint: [ "" ]
+  before_script:
+    - cd ${TF_ROOT}
+    - # git config --global url."https://oauth2:${GL_TOKEN}@gitlab.com".insteadOf https://gitlab.com
+    - ${TF_EXEC} version
+    - rm -rf .terraform
+    - ${TF_EXEC} init
+    - echo "-----------------"
+
+
+.terraform_cleanup:
+  extends: .terraform
+  image: "$TF_IMAGE"
+  stage: cleanup # is this meant to be "Destroy"?
 
 stages:
   - "Lint"
